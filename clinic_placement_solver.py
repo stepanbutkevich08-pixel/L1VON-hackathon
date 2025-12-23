@@ -28,19 +28,19 @@ KMEANS_BATCH_SIZE = 8192
 
 # Social-feature weights for client importance (ALL features except clinick_distance)
 FEATURE_COEFS = {
-    "client_age": 0.23636043538354456,
-    "density_area": 0.04911764375004013,
-    "park_distance": 0.1536018325377585,
-    "vulnerable_group_density": 0.06332847870255809,
-    "social_infrastructure_rating": 0.1951242410923364,
+    "client_age": 0.01995,
+    "density_area": 0.10924995,
+    "park_distance": 0.0001,
+    "vulnerable_group_density": 0.001,
+    "social_infrastructure_rating": 0.0005,
 }
 
 # 1=metro(best), 2=tram, 3=bus, 4=taxi(worst)
 TRANSPORT_MULTIPLIER = {
-    1: 0.7842848573518677, 
-    2: 1.2548485184925913, 
-    3: 1.493992300462883, 
-    4: 1.9359457473222608
+    1: 1.95555, 
+    2: 1.9948485184925913, 
+    3: 2.1, 
+    4: 2.5
                        }
 
 # Weight clipping to keep optimization stable
@@ -48,10 +48,10 @@ W_CLIP = (0.25, 6.0)
 
 # LCS weights (task metric #3).
 LCS_WEIGHTS = {
-    "density_area": 0.04911764375004013,                 # DA_j
-    "park_distance": 0.1536018325377585,                 # PD_j 
-    "vulnerable_group_density": 0.06332847870255809,     # VD_j
-    "social_infrastructure_rating": 0.1951242410923364,  # SI_j
+    "density_area": 0.5,                 # DA_j
+    "park_distance": 0.5,                 # PD_j 
+    "vulnerable_group_density": 0.5,     # VD_j
+    "social_infrastructure_rating": 0.5,  # SI_j
 }
 
 # Visualization
