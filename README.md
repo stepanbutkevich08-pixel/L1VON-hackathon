@@ -49,10 +49,10 @@ python3 clinic_placement_solver.py
 ├── clinic_placement_solver.py <----- Главный исполняемый файл проекта
 ├── test.py <------------------------ Генерация коэффицентов
 ├── plots <-------------------------- Визуализация
-│   ├── 01_map_clients_clinics.png <- 
-│   ├── 02_map_by_assignment.png <--- 
-│   ├── 03_weights_hist.png <--------
-│   └── 04_clinic_load_hist.png <----
+│   ├── 01_clinics_distribution.png <- 
+│   ├── 02_clinic_distribution_colored.png <--- 
+│   ├── 03_weights_of_clients.png <--------
+│   └── 04_workload_of_clinics.png<----
 ├── clinic-data.csv <---------------- Входные данные
 ├── clinics.csv <-------------------- Координаты клиник
 ├── README.md <---------------------- Описание
