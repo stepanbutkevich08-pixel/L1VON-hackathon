@@ -114,8 +114,8 @@ def run_solver_once(df, points, init_centers, feature_coefs, transport_multiplie
 
 def metric_TTT(points: np.ndarray, centers: np.ndarray) -> float:
     """TTT = sum_i min_j (alpha*d + beta*d^2)."""
-    d = pairwise_dist(points, centers)          # (M,N)
-    best = np.min(d, axis=1)                   # (M,)
+    d = pairwise_dist(points, centers)
+    best = np.min(d, axis=1)
     return float(np.sum(ALPHA * best + BETA * (best ** 2)))
 
 def sample_feature_coefs(rng):
