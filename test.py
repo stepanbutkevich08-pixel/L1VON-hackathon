@@ -66,7 +66,7 @@ def assign_with_capacity(points: np.ndarray, centers: np.ndarray, w: np.ndarray)
     return assign
 
 def build_client_weights_parametric(df, feature_coefs, transport_multiplier, w_clip=(0.25, 6.0)):
-    # robust z-score как в твоём коде
+    # robust z-score
     def robust_zscore(x, eps=1e-9):
         x = x.astype(float)
         med = np.nanmedian(x)
@@ -101,11 +101,11 @@ def run_solver_once(df, points, init_centers, feature_coefs, transport_multiplie
 
     # 2) итерации оптимизации
     for _ in range(n_iters):
-        assign = assign_with_capacity(points, centers, w)  # использует capacity из твоего кода
-        centers = update_centers(points, assign, centers, w)  # использует weiszfeld_steps из твоего кода/глобал
+        assign = assign_with_capacity(points, centers, w)  # использует capacity
+        centers = update_centers(points, assign, centers, w)  # использует weiszfeld_steps
 
         # 3) считаем TTT по формуле задания (без весов!)
-        ttt = metric_TTT(points, centers)  # использует alpha,beta из твоего кода/глобал
+        ttt = metric_TTT(points, centers)  # использует alpha,beta
         if ttt < best_ttt:
             best_ttt = ttt
             best_centers = centers.copy()
@@ -122,12 +122,12 @@ def sample_feature_coefs(rng):
     # Диапазоны подобраны так, чтобы веса не становились сумасшедшими
     # Можно расширять после первых прогонов.
     return {
-        "client_age": rng.uniform(0.0, 0.8),
-        "density_area": rng.uniform(0.0, 0.8),
-        "park_distance": rng.uniform(0.0, 0.6),
+        "client_age": rng.uniform(0.0, 1.0),
+        "density_area": rng.uniform(0.0, 1.0),
+        "park_distance": rng.uniform(0.0, 1.0),
         "vulnerable_group_density": rng.uniform(0.0, 1.0),
         # отрицательный коэффициент (чем выше рейтинг, тем меньше "need")
-        "social_infrastructure_rating": rng.uniform(-1.0, 0.0),
+        "social_infrastructure_rating": rng.uniform(0.0, 1.0),
     }
 
 def sample_transport_multiplier(rng):
