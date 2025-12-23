@@ -1,3 +1,7 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import numpy as np
 import pandas as pd
@@ -24,30 +28,30 @@ KMEANS_BATCH_SIZE = 8192
 
 # Social-feature weights for client importance (ALL features except clinick_distance)
 FEATURE_COEFS = {
-    "client_age": 0.20032162404146892,
-    "density_area": 0.20991077818689963,
-    "park_distance": 0.27823183679795566,
-    "vulnerable_group_density": 0.03099478848113446,
-    "social_infrastructure_rating": -0.3823305394463611,
+    "client_age": 0.23636043538354456,
+    "density_area": 0.04911764375004013,
+    "park_distance": 0.1536018325377585,
+    "vulnerable_group_density": 0.06332847870255809,
+    "social_infrastructure_rating": 0.1951242410923364,
 }
 
 # 1=metro(best), 2=tram, 3=bus, 4=taxi(worst)
 TRANSPORT_MULTIPLIER = {
-    1: 0.8391553042008542,
-    2: 1.1832826541689683,
-    3: 1.450205661235429,
-    4: 1.9030399519634689
-}
+    1: 0.7842848573518677, 
+    2: 1.2548485184925913, 
+    3: 1.493992300462883, 
+    4: 1.9359457473222608
+                       }
 
 # Weight clipping to keep optimization stable
 W_CLIP = (0.25, 6.0)
 
 # LCS weights (task metric #3).
 LCS_WEIGHTS = {
-    "density_area": 1.0,                  # DA_j
-    "park_distance": 1.0,                 # PD_j will be NEGATED inside LCS to make "closer park" better
-    "vulnerable_group_density": 1.0,      # VD_j
-    "social_infrastructure_rating": 1.0,  # SI_j
+    "density_area": 0.04911764375004013,                 # DA_j
+    "park_distance": 0.1536018325377585,                 # PD_j 
+    "vulnerable_group_density": 0.06332847870255809,     # VD_j
+    "social_infrastructure_rating": 0.1951242410923364,  # SI_j
 }
 
 # Visualization
@@ -110,6 +114,7 @@ def assign_with_capacity(points: np.ndarray, centers: np.ndarray, w: np.ndarray)
     order = np.argsort(d, axis=1)
 
     d1 = d[np.arange(len(points)), order[:, 0]]
+    # primary: w desc, secondary: d1 desc
     clients = np.lexsort((-d1, -w))
 
     remaining = np.full(len(centers), CAPACITY_L, dtype=np.int32)
@@ -179,7 +184,8 @@ def metric_LCS(df: pd.DataFrame, assign: np.ndarray, n_centers: int) -> float:
         if len(idx) == 0:
             continue
         DA_j = float(np.mean(da[idx]))
-        PD_j = float(-np.mean(pdist[idx]))
+        PD_j = float(np.mean(pdist[idx]))
+        
         VD_j = float(np.mean(vd[idx]))
         SI_j = float(np.mean(si[idx]))
 
@@ -245,6 +251,7 @@ def main():
     if len(points) > N_CLINICS * CAPACITY_L:
         raise ValueError(f"Clients={len(points)} > total capacity={N_CLINICS*CAPACITY_L}. Increase N_CLINICS or CAPACITY_L.")
 
+    # weights for assignment/update (not part of TTT metric directly)
     w = build_client_weights(df)
 
     # init centers
