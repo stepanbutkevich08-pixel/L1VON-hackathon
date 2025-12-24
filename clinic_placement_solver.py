@@ -3,12 +3,14 @@
 # -*- coding: utf-8 -*-
 
 import os
+import matplotlib
+matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.cluster import MiniBatchKMeans
 
-DATA_CSV_PATH = "Data.csv"
+DATA_CSV_PATH = "clinic-data.csv"
 OUT_CLINICS_CSV = "clinics.csv"
 PLOTS_DIR = "plots"
 
@@ -21,10 +23,10 @@ ALPHA = 0.05
 BETA = 0.02
 
 # Optimization
-N_ITERS = 10
 WEISZFELD_STEPS = 15
 RANDOM_STATE = 42
 KMEANS_BATCH_SIZE = 8192
+TTT_ITERS = 200  # iterations focused on TTT minimization (no capacity)
 
 # Social-feature weights for client importance (ALL features except clinick_distance)
 FEATURE_COEFS = {
@@ -155,6 +157,24 @@ def update_centers(points: np.ndarray, assign: np.ndarray, centers: np.ndarray, 
         new_centers[j] = weighted_geometric_median(points[idx], w[idx], centers[j])
     return new_centers
 
+def update_centers_ttt(points: np.ndarray, assign: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    """
+    Move centers to minimize TTT directly:
+      weight for point i: alpha / dist + 2*beta.
+    """
+    new_centers = centers.copy()
+    for j in range(len(centers)):
+        idx = np.where(assign == j)[0]
+        if len(idx) == 0:
+            continue
+        pts_j = points[idx]
+        diff = pts_j - centers[j]
+        r = np.sqrt(np.sum(diff * diff, axis=1))
+        r = np.where(r < 1e-8, 1e-8, r)
+        weights = ALPHA / r + 2 * BETA
+        new_centers[j] = np.sum(pts_j * weights[:, None], axis=0) / np.sum(weights)
+    return new_centers
+
 def metric_TTT(points: np.ndarray, centers: np.ndarray) -> float:
     """TTT = sum_i min_j (alpha*d + beta*d^2)."""
     d = pairwise_dist(points, centers)          # (M,N)
@@ -197,6 +217,33 @@ def metric_LCS(df: pd.DataFrame, assign: np.ndarray, n_centers: int) -> float:
         )
 
     return float(lcs_sum / n_centers)
+
+def optimize_centers_for_ttt(points: np.ndarray, init_centers: np.ndarray,
+                             n_iters: int = TTT_ITERS, log_every: int = 20) -> tuple[np.ndarray, float]:
+    """
+    Lloyd-like loop tailored to TTT:
+      1) assign by nearest center (no capacity)
+      2) shift centers with TTT weights (alpha / r + 2*beta)
+    Keeps the best TTT seen.
+    """
+    centers = init_centers.copy()
+    best_centers = centers.copy()
+    best_ttt = metric_TTT(points, centers)
+
+    for it in range(n_iters):
+        d = pairwise_dist(points, centers)
+        assign = np.argmin(d, axis=1)
+        centers = update_centers_ttt(points, assign, centers)
+
+        ttt = metric_TTT(points, centers)
+        if ttt < best_ttt:
+            best_ttt = ttt
+            best_centers = centers.copy()
+
+        if log_every and (it + 1) % log_every == 0:
+            print(f"TTT iter {it+1:03d}/{n_iters} | TTT={ttt:,.6f} | best={best_ttt:,.6f}")
+
+    return best_centers, best_ttt
 
 def visualize_and_save(df: pd.DataFrame, centers: np.ndarray, assign: np.ndarray) -> None:
     os.makedirs(PLOTS_DIR, exist_ok=True)
@@ -244,52 +291,45 @@ def main():
     df = pd.read_csv(DATA_CSV_PATH)
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"Data.csv is missing required columns: {missing}")
+        raise ValueError(f"{DATA_CSV_PATH} is missing required columns: {missing}")
 
     points = df[["x", "y"]].to_numpy(float)
 
     if len(points) > N_CLINICS * CAPACITY_L:
         raise ValueError(f"Clients={len(points)} > total capacity={N_CLINICS*CAPACITY_L}. Increase N_CLINICS or CAPACITY_L.")
 
-    # weights for assignment/update (not part of TTT metric directly)
+    # weights for capacity-aware assignment/plots
     w = build_client_weights(df)
 
-    # init centers
-    kmeans = MiniBatchKMeans(
-        n_clusters=N_CLINICS,
-        random_state=RANDOM_STATE,
-        batch_size=KMEANS_BATCH_SIZE,
-        n_init="auto",
-    )
-    kmeans.fit(points)
-    centers = kmeans.cluster_centers_.astype(float)
+    # init centers: warm start from existing clinics.csv if present, else k-means
+    if os.path.exists(OUT_CLINICS_CSV):
+        init_centers = pd.read_csv(OUT_CLINICS_CSV)[["x", "y"]].to_numpy(float)
+        print(f"Loaded initial centers from {OUT_CLINICS_CSV}")
+    else:
+        kmeans = MiniBatchKMeans(
+            n_clusters=N_CLINICS,
+            random_state=RANDOM_STATE,
+            batch_size=KMEANS_BATCH_SIZE,
+            n_init="auto",
+        )
+        kmeans.fit(points)
+        init_centers = kmeans.cluster_centers_.astype(float)
+        print("Initialized centers with MiniBatchKMeans")
 
-    best_centers = centers.copy()
-    best_ttt = float("inf")
-    best_assign = None
+    print("Starting TTT optimization...")
+    centers, best_ttt = optimize_centers_for_ttt(points, init_centers, n_iters=TTT_ITERS, log_every=20)
 
-    for it in range(N_ITERS):
-        assign = assign_with_capacity(points, centers, w)
-        centers = update_centers(points, assign, centers, w)
+    # capacity-aware assignment for reporting/plots
+    assign_cap = assign_with_capacity(points, centers, w)
+    co = metric_CO(assign_cap, len(centers))
+    lcs = metric_LCS(df, assign_cap, len(centers))
 
-        TTT = metric_TTT(points, centers)
-        CO = metric_CO(assign, len(centers))
-        LCS = metric_LCS(df, assign, len(centers))
+    pd.DataFrame(centers, columns=["x", "y"]).to_csv(OUT_CLINICS_CSV, index=False)
+    visualize_and_save(df, centers, assign_cap)
 
-        print(f"ITER {it+1:02d}/{N_ITERS} | TTT={TTT:,.3f} | CO={CO} | LCS={LCS:,.6f}")
-
-        if TTT < best_ttt:
-            best_ttt = TTT
-            best_centers = centers.copy()
-            best_assign = assign.copy()
-
-    pd.DataFrame(best_centers, columns=["x", "y"]).to_csv(OUT_CLINICS_CSV, index=False)
-
-    if best_assign is None:
-        best_assign = assign_with_capacity(points, best_centers, w)
-    visualize_and_save(df, best_centers, best_assign)
-
-    print("\nSaved:", OUT_CLINICS_CSV)
+    print("\nFinished.")
+    print(f"TTT={best_ttt:,.6f} | CO={co} | LCS={lcs:,.6f}")
+    print("Saved:", OUT_CLINICS_CSV)
     print("Saved plots to:", PLOTS_DIR)
 
 if __name__ == "__main__":
