@@ -26,27 +26,32 @@ BETA = 0.02
 WEISZFELD_STEPS = 15
 RANDOM_STATE = 42
 KMEANS_BATCH_SIZE = 8192
-TTT_ITERS = 200  # iterations focused on TTT minimization (no capacity)
+TTT_ITERS = 200          # iterations focused on TTT minimization (no capacity)
+TTT_LOG_EVERY = 20
+N_RESTARTS = 3           # k-means restarts for better TTT minima
 
 # Social-feature weights for client importance (ALL features except clinick_distance)
 FEATURE_COEFS = {
-    "client_age": 0.01995,
-    "density_area": 0.10924995,
-    "park_distance": 0.0001,
-    "vulnerable_group_density": 0.001,
-    "social_infrastructure_rating": 0.0005,
+    "client_age": 0.06917052,
+    "density_area": 0.1621698,
+    "park_distance": -0.00008931274,
+    "vulnerable_group_density": 0.00299977,
+    "social_infrastructure_rating": -0.00035131,
 }
 
 # 1=metro(best), 2=tram, 3=bus, 4=taxi(worst)
 TRANSPORT_MULTIPLIER = {
-    1: 1.95555, 
-    2: 1.9948485184925913, 
-    3: 2.1, 
-    4: 2.5
+    1: 1.78705976,
+    2: 1.80623717,
+    3: 1.83286559,
+    4: 2.04023626,
                        }
 
 # Weight clipping to keep optimization stable
-W_CLIP = (0.25, 6.0)
+W_CLIP = (0.20234528, 2.9232447)
+
+# Capacity-aware warmup before TTT optimization (uses weights)
+CAPACITY_WARM_ITERS = 12
 
 # LCS weights (task metric #3).
 LCS_WEIGHTS = {
@@ -175,6 +180,26 @@ def update_centers_ttt(points: np.ndarray, assign: np.ndarray, centers: np.ndarr
         new_centers[j] = np.sum(pts_j * weights[:, None], axis=0) / np.sum(weights)
     return new_centers
 
+def capacity_warm_opt(points: np.ndarray, centers: np.ndarray, w: np.ndarray,
+                      n_iters: int) -> tuple[np.ndarray, float]:
+    """
+    Capacity-aware warmup:
+      - assign with capacity and weights
+      - shift centers by weighted geometric median
+    Returns centers after warmup and best TTT observed during the warm stage.
+    """
+    centers_warm = centers.copy()
+    best_ttt = metric_TTT(points, centers_warm)
+
+    for _ in range(n_iters):
+        assign = assign_with_capacity(points, centers_warm, w)
+        centers_warm = update_centers(points, assign, centers_warm, w)
+        ttt = metric_TTT(points, centers_warm)
+        if ttt < best_ttt:
+            best_ttt = ttt
+
+    return centers_warm, best_ttt
+
 def metric_TTT(points: np.ndarray, centers: np.ndarray) -> float:
     """TTT = sum_i min_j (alpha*d + beta*d^2)."""
     d = pairwise_dist(points, centers)          # (M,N)
@@ -301,23 +326,44 @@ def main():
     # weights for capacity-aware assignment/plots
     w = build_client_weights(df)
 
-    # init centers: warm start from existing clinics.csv if present, else k-means
+    # build initial centers: warm start + several k-means seeds
+    init_candidates = []
     if os.path.exists(OUT_CLINICS_CSV):
-        init_centers = pd.read_csv(OUT_CLINICS_CSV)[["x", "y"]].to_numpy(float)
+        warm = pd.read_csv(OUT_CLINICS_CSV)[["x", "y"]].to_numpy(float)
+        init_candidates.append(("warm_start", warm))
         print(f"Loaded initial centers from {OUT_CLINICS_CSV}")
-    else:
+
+    for i in range(N_RESTARTS):
+        seed = RANDOM_STATE + i
         kmeans = MiniBatchKMeans(
             n_clusters=N_CLINICS,
-            random_state=RANDOM_STATE,
+            random_state=seed,
             batch_size=KMEANS_BATCH_SIZE,
             n_init="auto",
         )
         kmeans.fit(points)
-        init_centers = kmeans.cluster_centers_.astype(float)
-        print("Initialized centers with MiniBatchKMeans")
+        init_candidates.append((f"kmeans_seed_{seed}", kmeans.cluster_centers_.astype(float)))
+        print(f"Prepared k-means init seed={seed}")
 
-    print("Starting TTT optimization...")
-    centers, best_ttt = optimize_centers_for_ttt(points, init_centers, n_iters=TTT_ITERS, log_every=20)
+    # run TTT optimization for each init, keep the best
+    best = None
+    for label, init_centers in init_candidates:
+        print(f"\nStarting TTT optimization from {label}...")
+        centers_start = init_centers
+        warm_ttt = None
+        if CAPACITY_WARM_ITERS > 0:
+            centers_start, warm_ttt = capacity_warm_opt(points, centers_start, w, n_iters=CAPACITY_WARM_ITERS)
+            print(f"  Warm stage ({CAPACITY_WARM_ITERS} iters) best TTT={warm_ttt:,.6f}")
+
+        centers, ttt = optimize_centers_for_ttt(points, centers_start, n_iters=TTT_ITERS, log_every=TTT_LOG_EVERY)
+        print(f"Finished {label}: TTT={ttt:,.6f}")
+        if best is None or ttt < best[0]:
+            best = (ttt, centers, label, warm_ttt)
+
+    best_ttt, centers, best_label, best_warm_ttt = best
+    print(f"\nBest centers from {best_label} with TTT={best_ttt:,.6f}")
+    if best_warm_ttt is not None:
+        print(f"Best warm-stage TTT={best_warm_ttt:,.6f}")
 
     # capacity-aware assignment for reporting/plots
     assign_cap = assign_with_capacity(points, centers, w)
