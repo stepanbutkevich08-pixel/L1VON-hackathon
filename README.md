@@ -51,8 +51,7 @@ python3 clinic_placement_solver.py
 ├── plots <-------------------------- Визуализация
 │   ├── 01_clinics_distribution.png <- 
 │   ├── 02_clinic_distribution_colored.png <--- 
-│   ├── 03_weights_of_clients.png <--------
-│   └── 04_workload_of_clinics.png<----
+│   └── 03_workload_of_clinics.png <--------
 ├── clinic-data.csv <---------------- Входные данные
 ├── clinics.csv <-------------------- Координаты клиник
 ├── README.md <---------------------- Описание
