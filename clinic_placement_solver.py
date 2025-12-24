@@ -26,9 +26,9 @@ BETA = 0.02
 WEISZFELD_STEPS = 15
 RANDOM_STATE = 42
 KMEANS_BATCH_SIZE = 8192
-TTT_ITERS = 200          # iterations focused on TTT minimization (no capacity)
-TTT_LOG_EVERY = 20
-N_RESTARTS = 3           # k-means restarts for better TTT minima
+TTT_ITERS = 120          # iterations focused on TTT minimization (no capacity)
+TTT_LOG_EVERY = 0
+N_RESTARTS = 1           # k-means restarts (we rely on swap-search for extra exploration)
 
 # Social-feature weights for client importance (ALL features except clinick_distance)
 FEATURE_COEFS = {
@@ -52,6 +52,11 @@ W_CLIP = (0.20234528, 2.9232447)
 
 # Capacity-aware warmup before TTT optimization (uses weights)
 CAPACITY_WARM_ITERS = 12
+
+# Swap-based local search (helps escape local minima for TTT)
+SWAP_TRIES = 60
+SWAP_REFINE_ITERS = 20
+SWAP_RANDOM_SEED = 123
 
 # LCS weights (task metric #3).
 LCS_WEIGHTS = {
@@ -270,6 +275,32 @@ def optimize_centers_for_ttt(points: np.ndarray, init_centers: np.ndarray,
 
     return best_centers, best_ttt
 
+def swap_local_search(points: np.ndarray, centers: np.ndarray, n_swaps: int,
+                      refine_iters: int, rng_seed: int = SWAP_RANDOM_SEED) -> tuple[np.ndarray, float]:
+    """
+    Random-swap local search:
+      - replace one center with random client point
+      - run short TTT-only optimization
+      - keep the candidate if it improves TTT
+    Deterministic via rng_seed.
+    """
+    rng = np.random.default_rng(rng_seed)
+    best_centers = centers.copy()
+    best_ttt = metric_TTT(points, best_centers)
+
+    for s in range(n_swaps):
+        cand = best_centers.copy()
+        j = int(rng.integers(0, len(cand)))
+        idx = int(rng.integers(0, len(points)))
+        cand[j] = points[idx]
+
+        cand, cand_ttt = optimize_centers_for_ttt(points, cand, n_iters=refine_iters, log_every=0)
+        if cand_ttt < best_ttt:
+            best_centers = cand
+            best_ttt = cand_ttt
+
+    return best_centers, best_ttt
+
 def visualize_and_save(df: pd.DataFrame, centers: np.ndarray, assign: np.ndarray) -> None:
     os.makedirs(PLOTS_DIR, exist_ok=True)
     pts = df[["x", "y"]].to_numpy(float)
@@ -328,11 +359,6 @@ def main():
 
     # build initial centers: warm start + several k-means seeds
     init_candidates = []
-    if os.path.exists(OUT_CLINICS_CSV):
-        warm = pd.read_csv(OUT_CLINICS_CSV)[["x", "y"]].to_numpy(float)
-        init_candidates.append(("warm_start", warm))
-        print(f"Loaded initial centers from {OUT_CLINICS_CSV}")
-
     for i in range(N_RESTARTS):
         seed = RANDOM_STATE + i
         kmeans = MiniBatchKMeans(
@@ -355,22 +381,25 @@ def main():
             centers_start, warm_ttt = capacity_warm_opt(points, centers_start, w, n_iters=CAPACITY_WARM_ITERS)
             print(f"  Warm stage ({CAPACITY_WARM_ITERS} iters) best TTT={warm_ttt:,.6f}")
 
-        centers, ttt = optimize_centers_for_ttt(points, centers_start, n_iters=TTT_ITERS, log_every=TTT_LOG_EVERY)
-        print(f"Finished {label}: TTT={ttt:,.6f}")
-        if best is None or ttt < best[0]:
-            best = (ttt, centers, label, warm_ttt)
+        centers_base, ttt_base = optimize_centers_for_ttt(points, centers_start, n_iters=TTT_ITERS, log_every=TTT_LOG_EVERY)
+        centers_swap, ttt_swap = swap_local_search(points, centers_base, n_swaps=SWAP_TRIES, refine_iters=SWAP_REFINE_ITERS, rng_seed=SWAP_RANDOM_SEED)
 
-    best_ttt, centers, best_label, best_warm_ttt = best
+        print(f"Finished {label}: base TTT={ttt_base:,.6f} | after swaps TTT={ttt_swap:,.6f}")
+        if best is None or ttt_swap < best[0]:
+            best = (ttt_swap, centers_swap, label, warm_ttt, ttt_base)
+
+    best_ttt, centers, best_label, best_warm_ttt, best_base_ttt = best
     print(f"\nBest centers from {best_label} with TTT={best_ttt:,.6f}")
     if best_warm_ttt is not None:
         print(f"Best warm-stage TTT={best_warm_ttt:,.6f}")
+    print(f"Best pre-swap TTT={best_base_ttt:,.6f}")
 
     # capacity-aware assignment for reporting/plots
     assign_cap = assign_with_capacity(points, centers, w)
     co = metric_CO(assign_cap, len(centers))
     lcs = metric_LCS(df, assign_cap, len(centers))
 
-    pd.DataFrame(centers, columns=["x", "y"]).to_csv(OUT_CLINICS_CSV, index=False)
+    pd.DataFrame(centers, columns=["x", "y"]).to_csv(OUT_CLINICS_CSV, index=False, float_format="%.10f")
     visualize_and_save(df, centers, assign_cap)
 
     print("\nFinished.")
