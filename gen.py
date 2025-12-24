@@ -1,82 +1,138 @@
+"""
+gen.py — воспроизведение вычисления координат центров с нуля.
+Алгоритм: MiniBatchKMeans → прогрев → TTT-оптимизация → swap-поиск → мягкое уточнение (PyTorch).
+Запуск:
+    python gen.py          # клиенты из clinis-data.csv или clinic-data.csv, выводит TTT, сохраняет clinics.csv и centers.npy
+"""
+
 import os
 import sys
-from typing import List, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from sklearn.cluster import MiniBatchKMeans
 
-import clinic_placement_solver as solver
-
-# Constants
+# Глобальные параметры
 N_CLINICS = 250
 ALPHA = 0.05
 BETA = 0.02
+KMEANS_BATCH = 4096
+KMEANS_INIT = 20
+KMEANS_ITER = 200
+CAPACITY_WARM_ITERS = 6
+TTT_ITERS = 80
+SWAP_TRIES = 20
+SWAP_REFINE_ITERS = 12
+SEED = 42
 
-
-def metric_ttt(points: np.ndarray, centers: np.ndarray) -> float:
-    d2 = ((points[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-    best = np.sqrt(d2.min(axis=1))
-    return float(np.sum(ALPHA * best + BETA * best * best))
+ANNEAL_SCHEDULE = [
+    (0.08, 25),
+    (0.05, 25),
+    (0.03, 25),
+    (0.02, 25),
+    (0.015, 25),
+    (0.012, 25),
+    (0.01, 25),
+    (0.008, 25),
+]
 
 
 def load_points() -> Tuple[pd.DataFrame, np.ndarray]:
-    candidates: List[str] = ["clinis-data.csv", "clinic-data.csv"]
-    path = next((p for p in candidates if os.path.exists(p)), None)
-    if path is None:
-        raise FileNotFoundError("Neither clinis-data.csv nor clinic-data.csv found.")
+    path = "clinis-data.csv" if os.path.exists("clinis-data.csv") else "clinic-data.csv"
     df = pd.read_csv(path)
-    missing = [c for c in solver.REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"{path} is missing required columns: {missing}")
     pts = df[["x", "y"]].to_numpy(float)
     return df, pts
 
 
-def build_base_centers(df: pd.DataFrame, points: np.ndarray) -> np.ndarray:
-    """Fast approximation of the earlier 2337 TTT solution."""
-    weights = solver.build_client_weights(df)
+def pairwise_dist(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    diff = a[:, None, :] - b[None, :, :]
+    return np.sqrt(np.sum(diff * diff, axis=2))
 
-    kmeans = MiniBatchKMeans(
-        n_clusters=N_CLINICS,
-        random_state=42,
-        batch_size=4096,
-        n_init=5,
-    )
-    kmeans.fit(points)
-    centers = kmeans.cluster_centers_.astype(float)
 
-    # Warm capacity-aware positioning (short)
-    centers, _ = solver.capacity_warm_opt(points, centers, weights, n_iters=6)
-    # TTT-only refinement
-    centers, _ = solver.optimize_centers_for_ttt(points, centers, n_iters=80, log_every=0)
-    # Swap search
-    centers, _ = solver.swap_local_search(points, centers, n_swaps=25, refine_iters=12, rng_seed=123)
-    return centers
+def metric_ttt(points: np.ndarray, centers: np.ndarray) -> float:
+    d = pairwise_dist(points, centers)
+    best = np.min(d, axis=1)
+    return float(np.sum(ALPHA * best + BETA * (best ** 2)))
+
+
+def capacity_warm(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    cur = centers.copy()
+    for _ in range(CAPACITY_WARM_ITERS):
+        d = pairwise_dist(points, cur)
+        labels = d.argmin(axis=1)
+        new = cur.copy()
+        for j in range(len(cur)):
+            idx = np.where(labels == j)[0]
+            if len(idx) == 0:
+                continue
+            new[j] = points[idx].mean(axis=0)
+        cur = new
+    return cur
+
+
+def update_centers_ttt(points: np.ndarray, labels: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    new = centers.copy()
+    for j in range(len(centers)):
+        idx = np.where(labels == j)[0]
+        if len(idx) == 0:
+            continue
+        cluster = points[idx]
+        c = centers[j]
+        for _ in range(20):
+            diff = cluster - c
+            r = np.linalg.norm(diff, axis=1)
+            r[r == 0] = 1e-9
+            w = ALPHA / r + 2 * BETA
+            c_new = (w[:, None] * cluster).sum(axis=0) / w.sum()
+            if np.allclose(c_new, c, rtol=1e-7, atol=1e-8):
+                c = c_new
+                break
+            c = c_new
+        new[j] = c
+    return new
+
+
+def ttt_optimize(points: np.ndarray, centers: np.ndarray, iters: int) -> np.ndarray:
+    best = centers.copy()
+    best_val = metric_ttt(points, best)
+    cur = centers.copy()
+    for _ in range(iters):
+        d = pairwise_dist(points, cur)
+        labels = d.argmin(axis=1)
+        cur = update_centers_ttt(points, labels, cur)
+        val = metric_ttt(points, cur)
+        if val < best_val:
+            best_val = val
+            best = cur.copy()
+    return best
+
+
+def swap_search(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    rng = np.random.default_rng(SEED)
+    best = centers.copy()
+    best_val = metric_ttt(points, best)
+    for _ in range(SWAP_TRIES):
+        cand = best.copy()
+        j = int(rng.integers(0, len(cand)))
+        idx = int(rng.integers(0, len(points)))
+        cand[j] = points[idx]
+        cand = ttt_optimize(points, cand, SWAP_REFINE_ITERS)
+        val = metric_ttt(points, cand)
+        if val < best_val:
+            best = cand
+            best_val = val
+    return best
 
 
 def torch_refine(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
-    """Soft-assignment annealing to push TTT toward ~2334."""
-    device = "cpu"
-    pts = torch.tensor(points, dtype=torch.float32, device=device)
-    cent = torch.tensor(centers, dtype=torch.float32, device=device, requires_grad=True)
+    pts = torch.tensor(points, dtype=torch.float32)
+    cent = torch.tensor(centers, dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([cent], lr=0.008)
     best_cent = cent.detach().clone()
     best_val = float("inf")
-
-    schedule = [
-        (0.08, 25),
-        (0.05, 25),
-        (0.03, 25),
-        (0.02, 25),
-        (0.015, 25),
-        (0.012, 25),
-        (0.01, 25),
-        (0.008, 25),
-    ]
-
-    for tau, steps in schedule:
+    for tau, steps in ANNEAL_SCHEDULE:
         for _ in range(steps):
             diff = pts.unsqueeze(1) - cent.unsqueeze(0)
             dist = torch.norm(diff, dim=2)
@@ -87,34 +143,44 @@ def torch_refine(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
         with torch.no_grad():
             dist = torch.norm(pts.unsqueeze(1) - cent.unsqueeze(0), dim=2)
             best = dist.min(dim=1).values
-            ttt = (ALPHA * best + BETA * best * best).sum().item()
-            if ttt < best_val:
-                best_val = ttt
+            val = (ALPHA * best + BETA * best * best).sum().item()
+            if val < best_val:
+                best_val = val
                 best_cent = cent.detach().clone()
-
         for g in optimizer.param_groups:
             g["lr"] *= 0.7
-
     return best_cent.cpu().numpy()
 
 
-def main() -> None:
-    # deterministic seeds
-    np.random.seed(0)
-    torch.manual_seed(0)
-
-    df, points = load_points()
-    centers = build_base_centers(df, points)
+def compute_centers(points: np.ndarray) -> np.ndarray:
+    kmeans = MiniBatchKMeans(
+        n_clusters=N_CLINICS,
+        random_state=SEED,
+        batch_size=KMEANS_BATCH,
+        n_init=KMEANS_INIT,
+        max_iter=KMEANS_ITER,
+    )
+    kmeans.fit(points)
+    centers = kmeans.cluster_centers_.astype(float)
+    centers = capacity_warm(points, centers)
+    centers = ttt_optimize(points, centers, TTT_ITERS)
+    centers = swap_search(points, centers)
     centers = torch_refine(points, centers)
+    return centers
 
+
+def main() -> None:
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    _, points = load_points()
+    centers = compute_centers(points)
     pd.DataFrame(centers, columns=["x", "y"]).to_csv("clinics.csv", index=False)
-    ttt = metric_ttt(points, centers)
+    np.save("centers.npy", centers)
     print(f"Saved clinics.csv with {len(centers)} clinics")
-    print(f"TTT={ttt:.6f}")
+    print(f"TTT={metric_ttt(points, centers):.6f}")
 
 
 if __name__ == "__main__":
